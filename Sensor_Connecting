@@ -1,0 +1,383 @@
+// === Button Definitions ===
+#define UP_BUTTON 2
+#define DOWN_BUTTON 6
+#define SELECT_BUTTON 3
+#define BACK_BUTTON 7
+
+// === Sensor Pin Definitions ===
+#define PH_PIN A1
+#define TDS_PIN A0
+#define TEMP_PIN 4 // OneWire on D4
+
+// === Library Includes ===
+#include <Wire.h>
+#include <WiFiNINA.h>
+#include <WiFiSSLClient.h>
+#include <hd44780.h>
+#include <hd44780ioClass/hd44780_I2Cexp.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+
+// === LCD Setup ===
+hd44780_I2Cexp lcd;
+const int LCD_COLS = 16;
+const int LCD_ROWS = 2;
+
+// === WiFi and Supabase Credentials ===
+//Kade modify wifi here
+const char* ssid = "iPhone";
+const char* password = "Banana16";
+const String SUPABASE_HOST = "dbfglovgjuzqiejekflg.supabase.co";
+const String SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRiZmdsb3ZnanV6cWllamVrZmxnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDM4ODI2NzQsImV4cCI6MjA1OTQ1ODY3NH0.mzRht4dDiCC9GQlX_5c1K_UJKWXvKeAHPBHqBVNsHvU";  // 🔁 Replace this
+const char* DEVICE_ID = "2ec805ec-2ab9-47d5-aed9-e6c8da1ecd6a";  // 🔁 Replace this if needed
+
+// === Tank IDs and Labels ===
+struct Tank {
+  const char* name;
+  const char* id;
+};
+
+const Tank tanks[10] = {
+  { "Tank 1",       "a62e3002-4843-4674-86af-72ebeefdb7a8" },
+  { "Aquarium 2",   "545ccf9b-6d1f-48e1-99c1-982e36264ebd" },
+  { "Aquapond 3",   "f7b41ec6-0370-472c-82bd-60be73c1b89a" },
+  { "Water 4",      "f9e0a5db-0296-4b72-935b-31eb77c9fa0b" },
+  { "Nemo 5",       "545ccf9b-6d1f-48e1-99c1-98263f69fdf9" },
+  { "Beta 6",       "545ccf9b-6d1f-48e1-99c1-98263f69fdf9" },
+  { "WaterBox 7",   "545ccf9b-6d1f-48e1-99c1-98263f69fdf9" },
+  { "Fish Bowl 8",  "545ccf9b-6d1f-48e1-99c1-98263f69fdf9" },
+  { "Jar 9",        "545ccf9b-6d1f-48e1-99c1-98263f69fdf9" },
+  { "Bowl 10",      "545ccf9b-6d1f-48e1-99c1-98263f69fdf9" }
+};
+
+// === Global UI States ===
+int topTankIndex = 0;
+int selectedTankIndex = 0;
+bool inMeasurementScreen = false;
+bool measureSelected = false;
+bool wifiConnected = false;
+
+// === WiFi Setup Function ===
+void setupWiFi() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Connecting...");
+  lcd.setCursor(0, 1);
+  lcd.print("to WiFi");
+
+  WiFi.begin(ssid, password);
+  unsigned long start = millis();
+
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) {
+    delay(500);
+  }
+
+  lcd.clear();
+  if (WiFi.status() == WL_CONNECTED) {
+    lcd.print("WiFi connected");
+    Serial.println("✅ WiFi connected!");
+    wifiConnected = true;
+    delay(1000);
+  } else {
+    lcd.print("WiFi failed");
+    Serial.println("❌ WiFi failed.");
+    wifiConnected = false;
+    delay(2000);
+  }
+}
+
+// === Supabase Upload Function ===
+void sendMeasurementToSupabase(String tankId, String deviceId, float pH, int tds, float temp) {
+  if (!wifiConnected) return;
+
+  WiFiSSLClient client;
+  if (!client.connect(SUPABASE_HOST.c_str(), 443)) {
+    Serial.println("⚠️ Connection to Supabase failed.");
+    showUploadStatus(false);
+    return;
+  }
+
+  String payload = "{";
+  payload += "\"tank_id\": \"" + tankId + "\",";
+  payload += "\"device_id\": \"" + deviceId + "\",";
+  payload += "\"ph\": " + String(pH, 2) + ",";
+  payload += "\"tds\": " + String(tds) + ",";
+  payload += "\"temperature\": " + String(temp, 1);
+  payload += "}";
+
+  String request = "";
+  request += "POST /rest/v1/sensor_readings HTTP/1.1\r\n";
+  request += "Host: " + SUPABASE_HOST + "\r\n";
+  request += "Authorization: Bearer " + SUPABASE_KEY + "\r\n";
+  request += "apikey: " + SUPABASE_KEY + "\r\n";
+  request += "Content-Type: application/json\r\n";
+  request += "Content-Length: " + String(payload.length()) + "\r\n";
+  request += "Connection: close\r\n\r\n";
+  request += payload;
+
+  client.print(request);
+  Serial.println("📤 Sending...");
+
+  bool success = false;
+  while (client.connected()) {
+    String line = client.readStringUntil('\n');
+    Serial.println(line);
+    if (line.indexOf("201 Created") >= 0) success = true;
+    if (line == "\r") break;
+  }
+
+  while (client.available()) {
+    String line = client.readStringUntil('\n');
+    Serial.println(line);
+  }
+
+  client.stop();
+  showUploadStatus(success);
+}
+
+// === Show Upload Status on LCD ===
+void showUploadStatus(bool success) {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(success ? "Upload Success" : "❌ Upload Failed");
+  delay(2000);
+}
+
+#define ONE_WIRE_BUS 4
+
+OneWire oneWire(ONE_WIRE_BUS);
+
+DallasTemperature sensors(&oneWire);
+
+// === Setup Function ===
+void setup() {
+  Serial.begin(115200);
+  lcd.begin(LCD_COLS, LCD_ROWS);
+  lcd.clear();
+
+  pinMode(UP_BUTTON, INPUT);
+  pinMode(DOWN_BUTTON, INPUT);
+  pinMode(SELECT_BUTTON, INPUT);
+  pinMode(BACK_BUTTON, INPUT);
+
+  sensors.begin();
+  updateLCD();
+  setupWiFi();
+}
+
+// === Main Loop ===
+void loop() {
+  static unsigned long lastButtonPress = 0;
+  const unsigned long debounceDelay = 200;
+
+  if (millis() - lastButtonPress < debounceDelay) return;
+
+  if (!inMeasurementScreen) {
+    if (digitalRead(UP_BUTTON) == HIGH) {
+      if (selectedTankIndex > 0) {
+        selectedTankIndex--;
+        if (selectedTankIndex < topTankIndex) topTankIndex--;
+        updateLCD();
+      }
+      lastButtonPress = millis();
+    }
+
+    if (digitalRead(DOWN_BUTTON) == HIGH) {
+      if (selectedTankIndex < 9) {
+        selectedTankIndex++;
+        if (selectedTankIndex > topTankIndex + 1) topTankIndex++;
+        updateLCD();
+      }
+      lastButtonPress = millis();
+    }
+
+    if (digitalRead(SELECT_BUTTON) == HIGH) {
+      inMeasurementScreen = true;
+      measureSelected = false;
+      updateMeasurementScreen();
+      lastButtonPress = millis();
+    }
+  } else {
+    if (digitalRead(UP_BUTTON) == HIGH || digitalRead(DOWN_BUTTON) == HIGH) {
+      measureSelected = !measureSelected;
+      updateMeasurementScreen();
+      lastButtonPress = millis();
+    }
+
+    if (digitalRead(SELECT_BUTTON) == HIGH) {
+      if (measureSelected) {
+        startMeasurement();
+      }
+      lastButtonPress = millis();
+    }
+
+    if (digitalRead(BACK_BUTTON) == HIGH) {
+      inMeasurementScreen = false;
+      updateLCD();
+      lastButtonPress = millis();
+    }
+  }
+}
+
+// === LCD Update Functions ===
+void updateLCD() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print((selectedTankIndex == topTankIndex ? "[> " : "   "));
+  lcd.print(tanks[topTankIndex].name);
+  if (selectedTankIndex == topTankIndex) lcd.print(" <]");
+
+  lcd.setCursor(0, 1);
+  lcd.print((selectedTankIndex == topTankIndex + 1 ? "[> " : "   "));
+  lcd.print(tanks[topTankIndex + 1].name);
+  if (selectedTankIndex == topTankIndex + 1) lcd.print(" <]");
+}
+
+void updateMeasurementScreen() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(!measureSelected ? "[> " : "   ");
+  lcd.print(tanks[selectedTankIndex].name);
+  if (!measureSelected) lcd.print(" <]");
+
+  lcd.setCursor(0, 1);
+  lcd.print(measureSelected ? "[> Measure? <]" : "   Measure?");
+}
+
+// -------------------------------------------------------Measurement functions
+
+//Median Function
+int getMedian(int *data, int size) {
+  int temp[size];
+  for (int i = 0; i < size; i++) {
+    temp[i] = data[i];
+  }
+
+  for (int i = 0; i < size - 1; i++) {
+    for (int j = i + 1; j < size; j++) {
+      if (temp[j] < temp[i]) {
+        int swap = temp[i];
+        temp[i] = temp[j];
+        temp[j] = swap;
+      }
+    }
+  }
+
+  if (size % 2 == 0) {
+    return (temp[size / 2 - 1] + temp[size / 2]) / 2;
+  } else {
+    return temp[size / 2];
+  }
+}
+
+
+
+// ph Reading Function
+float readPH() {
+  const int SCOUNT = 20;
+  int buffer[SCOUNT];
+
+  Serial.println("📡 PH Readings:");
+  for (int i = 0; i < SCOUNT; i++) {
+    buffer[i] = analogRead(PH_PIN);
+    Serial.print(buffer[i]);
+    Serial.print(i < SCOUNT - 1 ? ", " : "\n");
+    delay(20);
+  }
+
+  int median = getMedian(buffer, SCOUNT);
+  Serial.print("📊 PH Median: ");
+  Serial.println(median);
+
+  float calibratedPH = -0.0214 * median + 16.7711;
+  Serial.print("✅ Calibrated pH: ");
+  Serial.println(calibratedPH, 2);
+
+  return calibratedPH;
+}
+
+
+// TDS Reading Function
+int readTDS() {
+  const int SCOUNT = 30;
+  int analogBuffer[SCOUNT];
+
+  Serial.println("📡 TDS Readings:");
+  for (int i = 0; i < SCOUNT; i++) {
+    analogBuffer[i] = analogRead(TDS_PIN);
+    Serial.print(analogBuffer[i]);
+    Serial.print(i < SCOUNT - 1 ? ", " : "\n");
+    delay(20);
+  }
+
+  int median = getMedian(analogBuffer, SCOUNT);
+  Serial.print("📊 TDS Median: ");
+  Serial.println(median);
+
+  float voltage = median * (5.0 / 1024.0);
+  float compensatedVoltage = voltage;
+
+  float tds = (133.42 * pow(compensatedVoltage, 3)
+             - 255.86 * pow(compensatedVoltage, 2)
+             + 857.39 * compensatedVoltage) * 0.5;
+  int calibratedTDS = (int)(tds / 880.0 * 706.5);
+
+  Serial.print("✅ Calibrated TDS (ppm): ");
+  Serial.println(calibratedTDS);
+
+  return calibratedTDS;
+}
+
+
+// Temperature reading function
+float readTemp() {
+  sensors.requestTemperatures();  // Ask for temp from DS18B20
+  float celsius = sensors.getTempCByIndex(0);
+
+  Serial.print("🌡️ Temperature: ");
+  Serial.print(celsius, 2);
+  Serial.println(" °C");
+
+  return celsius;
+}
+
+
+
+// === Simulated Measurement + Upload ===
+void startMeasurement() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Measuring...");
+
+  for (int i = 0; i <= 10; i++) {
+    lcd.setCursor(0, 1);
+    for (int j = 0; j < i; j++) lcd.print((char)255);
+    delay(300);
+  }
+
+  float pH = readPH();
+  int tds = readTDS();
+  float temp = readTemp();
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("pH:");
+  lcd.print(pH, 2);
+  lcd.print(" TDS:");
+  lcd.print(tds);
+
+  lcd.setCursor(0, 1);
+  lcd.print("Temp:");
+  lcd.print(temp, 1);
+  lcd.print((char)223);
+  lcd.print("C");
+
+  sendMeasurementToSupabase(tanks[selectedTankIndex].id, DEVICE_ID, pH, tds, temp);
+
+  while (digitalRead(BACK_BUTTON) == LOW) {
+    // Wait
+  }
+
+  inMeasurementScreen = false;
+  updateLCD();
+}
